@@ -167,10 +167,15 @@ interface IDomainHub {
     /// so signatures for one transition cannot be replayed against a later one.
     function stateNonces(uint64 domainChainId) external view returns (uint256);
 
-    /// @notice Votes accumulated for a proposal, keyed by its `stateTransitionDigest`.
-    function stateVotes(bytes32 digest) external view returns (uint256);
+    /// @notice Votes accumulated for a proposal of the domain, keyed by its
+    /// `stateTransitionDigest`. The count of the first proposal voted for in a round is kept
+    /// only until the domain advances.
+    function stateVotes(uint64 domainChainId, bytes32 digest) external view returns (uint256);
 
-    function hasVotedFor(bytes32 digest, address validator) external view returns (bool);
+    /// @notice Whether `validator` voted for the proposal `digest` of the domain. For the first
+    /// proposal of a round, kept only until the validator votes for the first proposal of a
+    /// later round.
+    function hasVotedFor(uint64 domainChainId, bytes32 digest, address validator) external view returns (bool);
 
     /// @notice True if `anchor` was attested as the root of a batch of messages sent from
     /// `domainChainId` (both L1 callbacks and messages to other domains).
@@ -194,8 +199,9 @@ interface IDomainHub {
     /// their destination spoke using retryL1Message with the shared delivery envelope.
     function retryDomainMessage(MessageLib.DomainMessage calldata message) external;
 
-    /// @notice True once an authenticated message has been attempted on L1 or queued to a domain.
-    function relayedDomainMessages(uint64 sourceChainId, bytes32 messageHash) external view returns (bool);
+    /// @notice True once the authenticated message with `sourceNonce` has been attempted on L1
+    /// or queued to a domain. The source spoke gives each of its messages its own nonce.
+    function relayedDomainMessages(uint64 sourceChainId, uint256 sourceNonce) external view returns (bool);
 
     /// @notice True if an authenticated message is awaiting a successful retry.
     function failedDomainMessages(uint64 sourceChainId, bytes32 messageHash) external view returns (bool);

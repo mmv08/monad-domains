@@ -44,7 +44,7 @@ export const DOMAIN_STATE_UPDATED_EVENT = parseAbiItem(
 );
 
 const HUB_DELIVERY_ABI = [
-  parseAbiItem("function relayedDomainMessages(uint64 sourceChainId, bytes32 messageHash) view returns (bool)"),
+  parseAbiItem("function relayedDomainMessages(uint64 sourceChainId, uint256 sourceNonce) view returns (bool)"),
   parseAbiItem("function failedDomainMessages(uint64 sourceChainId, bytes32 messageHash) view returns (bool)"),
 ] as const;
 
@@ -368,7 +368,7 @@ export async function domainMessageDeliveryStatus(
       address: hub,
       abi: HUB_DELIVERY_ABI,
       functionName: "relayedDomainMessages",
-      args: [message.sourceChainId, messageHash],
+      args: [message.sourceChainId, message.sourceNonce],
       blockNumber,
     }),
     client.readContract({

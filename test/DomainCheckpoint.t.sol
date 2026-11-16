@@ -72,7 +72,7 @@ contract DomainCheckpointTest is DomainTestBase {
         bytes32 digest = hub.stateTransitionDigest(CHAIN_ID, 10, root, anchor);
 
         _submit(10, root, anchor, K1);
-        assertEq(hub.stateVotes(digest), 1);
+        assertEq(hub.stateVotes(CHAIN_ID, digest), 1);
         assertEq(hub.stateRoots(CHAIN_ID), bytes32(0));
         assertFalse(hub.domainAnchors(CHAIN_ID, anchor));
         assertEq(hub.stateNonces(CHAIN_ID), 0);
@@ -89,13 +89,84 @@ contract DomainCheckpointTest is DomainTestBase {
         _submit(10, bytes32(0), bytes32(0), K1);
         _submit(20, bytes32(0), bytes32(0), K2);
         assertEq(hub.domainBlockNumbers(CHAIN_ID), 0);
-        assertEq(hub.stateVotes(hub.stateTransitionDigest(CHAIN_ID, 10, bytes32(0), bytes32(0))), 1);
-        assertEq(hub.stateVotes(hub.stateTransitionDigest(CHAIN_ID, 20, bytes32(0), bytes32(0))), 1);
+        assertEq(hub.stateVotes(CHAIN_ID, hub.stateTransitionDigest(CHAIN_ID, 10, bytes32(0), bytes32(0))), 1);
+        assertEq(hub.stateVotes(CHAIN_ID, hub.stateTransitionDigest(CHAIN_ID, 20, bytes32(0), bytes32(0))), 1);
 
         // Whichever proposal reaches quorum first wins; the other dies with the nonce bump.
         _submit(10, bytes32(0), bytes32(0), K2);
         assertEq(hub.domainBlockNumbers(CHAIN_ID), 10);
-        assertEq(hub.stateVotes(hub.stateTransitionDigest(CHAIN_ID, 20, bytes32(0), bytes32(0))), 0);
+        assertEq(hub.stateVotes(CHAIN_ID, hub.stateTransitionDigest(CHAIN_ID, 20, bytes32(0), bytes32(0))), 0);
+    }
+
+    function test_aValidatorMayBackCompetingProposals() public {
+        bytes32 first = hub.stateTransitionDigest(CHAIN_ID, 10, bytes32(0), bytes32(0));
+        bytes32 second = hub.stateTransitionDigest(CHAIN_ID, 10, keccak256("root"), bytes32(0));
+        // The first proposal leads the round; the second is counted apart from it.
+        _submit(10, bytes32(0), bytes32(0), K1);
+        _submit(10, keccak256("root"), bytes32(0), K1);
+        assertEq(hub.stateVotes(CHAIN_ID, first), 1);
+        assertEq(hub.stateVotes(CHAIN_ID, second), 1);
+        assertTrue(hub.hasVotedFor(CHAIN_ID, first, vm.addr(K1)));
+        assertTrue(hub.hasVotedFor(CHAIN_ID, second, vm.addr(K1)));
+        assertFalse(hub.hasVotedFor(CHAIN_ID, second, vm.addr(K2)));
+
+        bytes memory again = _sig(10, keccak256("root"), bytes32(0), K1);
+        vm.expectRevert(DomainHub.AlreadyVoted.selector);
+        hub.submitStateSignature(CHAIN_ID, 10, keccak256("root"), bytes32(0), again);
+
+        // A proposal that does not lead can still reach quorum.
+        _submit(10, keccak256("root"), bytes32(0), K2);
+        assertEq(hub.stateNonces(CHAIN_ID), 1);
+        assertEq(hub.stateRoots(CHAIN_ID), keccak256("root"));
+    }
+
+    function test_leadingVotesDoNotCarryIntoTheNextRound() public {
+        _submit(10, bytes32(0), bytes32(0), K1);
+        _submit(10, bytes32(0), bytes32(0), K2);
+        // Both validators voted for the leading proposal of nonce 0; nonce 1 starts empty.
+        bytes32 next = hub.stateTransitionDigest(CHAIN_ID, 20, bytes32(0), bytes32(0));
+        assertEq(hub.stateVotes(CHAIN_ID, next), 0);
+        assertFalse(hub.hasVotedFor(CHAIN_ID, next, vm.addr(K1)));
+        _submit(20, bytes32(0), bytes32(0), K1);
+        assertEq(hub.stateVotes(CHAIN_ID, next), 1);
+        assertTrue(hub.hasVotedFor(CHAIN_ID, next, vm.addr(K1)));
+        assertEq(hub.domainBlockNumbers(CHAIN_ID), 10);
+        _submit(20, bytes32(0), bytes32(0), K2);
+        assertEq(hub.domainBlockNumbers(CHAIN_ID), 20);
+    }
+
+    /// @dev A validator set larger than a storage page.
+    function test_validatorSetSpanningPagesReachesQuorum() public {
+        uint256[] memory keys = new uint256[](200);
+        for (uint256 i = 0; i < keys.length; i++) {
+            keys[i] = 0x1000 + i;
+        }
+        _registerDomain(hub, 4242, keys, keys.length);
+        assertEq(hub.getValidators(4242), _addresses(keys));
+        uint64 start = hub.domainBlockNumbers(4242);
+        uint64 target = start + CHECKPOINT_INTERVAL;
+        vm.roll(uint256(target) + 1);
+        for (uint256 i = keys.length; i > 0; i--) {
+            assertEq(hub.domainBlockNumbers(4242), start);
+            hub.submitStateSignature(
+                4242,
+                target,
+                bytes32(0),
+                bytes32(0),
+                _signTransition(hub, 4242, target, bytes32(0), bytes32(0), keys[i - 1])
+            );
+        }
+        assertEq(hub.domainBlockNumbers(4242), target);
+    }
+
+    function test_registrationRejectsDuplicatesPagesApart() public {
+        address[] memory validators = new address[](150);
+        for (uint256 i = 0; i < validators.length; i++) {
+            validators[i] = address(uint160(0x1000 + i));
+        }
+        validators[149] = validators[0];
+        vm.expectRevert(DomainHub.DuplicateValidator.selector);
+        hub.registerDomain(4242, validators, 1, address(this), "", CHECKPOINT_INTERVAL, MAX_UNATTESTED_PERIODS);
     }
 
     function test_staleSignatureDoesNotReplayAfterAdvance() public {

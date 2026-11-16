@@ -28,7 +28,10 @@ for (const [relayed, failed, expected] of [
     assert.equal(reads.length, 2);
     for (const request of reads) {
       assert.equal(request.address, hub);
-      assert.deepEqual(request.args, [7777n, messageHash]);
+      assert.deepEqual(
+        request.args,
+        request.functionName === "relayedDomainMessages" ? [7777n, message.sourceNonce] : [7777n, messageHash],
+      );
       assert.equal(request.blockNumber, 42n, "both flags must describe the same block");
     }
   });

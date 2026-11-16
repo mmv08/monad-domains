@@ -146,7 +146,7 @@ contract DomainToDomainTest is DomainTestBase {
         l1BridgeB.setTokenAllowed(address(token), false);
         vm.expectRevert(L1Bridge.TokenNotAllowed.selector);
         router.relay{value: DELIVERY_FEE}(l1BridgeA, l1BridgeB, message, anchor, _emptyProof(), bobOnB);
-        assertFalse(hub.relayedDomainMessages(CHAIN_A, _hash(message)));
+        assertFalse(hub.relayedDomainMessages(CHAIN_A, message.sourceNonce));
         assertEq(token.balanceOf(address(l1BridgeA)), AMOUNT);
         assertEq(token.balanceOf(address(router)), 0);
         l1BridgeB.setTokenAllowed(address(token), true);
@@ -165,7 +165,7 @@ contract DomainToDomainTest is DomainTestBase {
         token.mint(address(router), AMOUNT);
         vm.expectRevert("Router: withdrawal delivery failed");
         router.relay{value: DELIVERY_FEE}(l1BridgeA, l1BridgeB, message, anchor, _emptyProof(), bobOnB);
-        assertFalse(hub.relayedDomainMessages(CHAIN_A, anchor));
+        assertFalse(hub.relayedDomainMessages(CHAIN_A, message.sourceNonce));
         assertFalse(hub.failedDomainMessages(CHAIN_A, anchor));
         assertEq(token.balanceOf(address(router)), AMOUNT);
         assertEq(token.balanceOf(address(l1BridgeB)), 0);

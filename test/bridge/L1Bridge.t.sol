@@ -228,7 +228,7 @@ contract L1BridgeTest is DomainTestBase {
 
         assertEq(token.balanceOf(bob), 40 ether);
         assertEq(token.balanceOf(address(bridge)), 60 ether);
-        assertTrue(hub.relayedDomainMessages(CHAIN_ID, messageHash));
+        assertTrue(hub.relayedDomainMessages(CHAIN_ID, message.sourceNonce));
     }
 
     function test_withdraw_isNeverConsumedWithoutReleasingTokens() public {

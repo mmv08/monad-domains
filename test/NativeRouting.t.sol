@@ -119,7 +119,7 @@ contract NativeRoutingTest is DomainTestBase {
         assertEq(envelope.from, alice);
         assertEq(envelope.to, address(receiver));
         assertEq(envelope.data, message.data);
-        assertTrue(hub.relayedDomainMessages(message.sourceChainId, _id(message)));
+        assertTrue(hub.relayedDomainMessages(message.sourceChainId, message.sourceNonce));
         vm.expectEmit(address(spokeB));
         emit IDomainSpoke.L1MessageRelayed(MessageLib.hashMessage(envelope), A, alice, address(receiver), 0, true);
         _deliver(envelope);
@@ -157,7 +157,7 @@ contract NativeRoutingTest is DomainTestBase {
         bytes32 anchor = _attestBatch(hub, spokeA, KEY);
         vm.expectRevert(DomainHub.DestinationNotRegistered.selector);
         hub.relayDomainMessage(message, anchor, new bytes32[](0));
-        assertFalse(hub.relayedDomainMessages(A, _id(message)));
+        assertFalse(hub.relayedDomainMessages(A, message.sourceNonce));
     }
 
     function test_senderIdentityIsAssignedAndSameChainAndZeroTargetRejected() public {
@@ -193,7 +193,7 @@ contract NativeRoutingTest is DomainTestBase {
         MessageLib.DomainMessage memory message = _sendTo(C, address(receiver), hex"");
         bytes32 anchor = _attestBatch(hub, spokeA, KEY);
         assertTrue(hub.relayDomainMessage{value: DELIVERY_FEE}(message, anchor, new bytes32[](0)));
-        assertTrue(hub.relayedDomainMessages(A, _id(message)));
+        assertTrue(hub.relayedDomainMessages(A, message.sourceNonce));
         assertEq(hub.l1MessageCounts(C), 1);
     }
 
@@ -248,7 +248,7 @@ contract NativeRoutingTest is DomainTestBase {
         if (field == 6) message.salt = bytes32(0);
         vm.expectRevert(DomainHub.InvalidProof.selector);
         hub.relayDomainMessage(message, anchor, new bytes32[](0));
-        assertFalse(hub.relayedDomainMessages(message.sourceChainId, _id(message)));
+        assertFalse(hub.relayedDomainMessages(message.sourceChainId, message.sourceNonce));
         assertEq(hub.l1MessageCounts(B), 0);
         assertEq(hub.l1MessageCounts(C), 0);
     }
@@ -291,7 +291,7 @@ contract NativeRoutingTest is DomainTestBase {
         vm.deal(address(this), 1 ether);
         vm.expectRevert(DomainHub.UnexpectedL1CallbackFee.selector);
         hub.relayDomainMessage{value: 1}(message, anchor, new bytes32[](0));
-        assertFalse(hub.relayedDomainMessages(A, _id(message)));
+        assertFalse(hub.relayedDomainMessages(A, message.sourceNonce));
     }
 
     function test_routeRejectsAFeeBelowTheDestinationMinimum() public {
@@ -301,7 +301,7 @@ contract NativeRoutingTest is DomainTestBase {
         vm.deal(address(this), 1 ether);
         vm.expectRevert(DomainHub.DeliveryFeeTooLow.selector);
         hub.relayDomainMessage{value: minimum - 1}(message, anchor, new bytes32[](0));
-        assertFalse(hub.relayedDomainMessages(A, _id(message)), "an underpaid relay consumes nothing");
+        assertFalse(hub.relayedDomainMessages(A, message.sourceNonce), "an underpaid relay consumes nothing");
         assertTrue(hub.relayDomainMessage{value: minimum}(message, anchor, new bytes32[](0)));
     }
 
@@ -313,7 +313,7 @@ contract NativeRoutingTest is DomainTestBase {
         vm.deal(address(this), 1 ether);
         vm.expectRevert(InputQueue.TooManyUnattestedPeriods.selector);
         hub.relayDomainMessage{value: DELIVERY_FEE}(message, anchor, new bytes32[](0));
-        assertFalse(hub.relayedDomainMessages(A, _id(message)), "a refused relay consumes nothing");
+        assertFalse(hub.relayedDomainMessages(A, message.sourceNonce), "a refused relay consumes nothing");
 
         _post(hub, B, bytes32(0));
         assertTrue(hub.relayDomainMessage{value: DELIVERY_FEE}(message, anchor, new bytes32[](0)));

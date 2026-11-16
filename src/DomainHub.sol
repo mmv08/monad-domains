@@ -5,11 +5,14 @@ import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import {BitMaps} from "@openzeppelin/contracts/utils/structs/BitMaps.sol";
 import {IDomainHub, IDomainMessageReceiver} from "./interfaces/IDomain.sol";
 import {MessageLib} from "./libraries/MessageLib.sol";
 import {InputQueue} from "./libraries/InputQueue.sol";
 
 contract DomainHub is IDomainHub, EIP712 {
+    using BitMaps for BitMaps.BitMap;
+
     error L1ChainIdNotAllowed();
     error DomainAlreadyRegistered();
     error ZeroQuorum();
@@ -73,40 +76,53 @@ contract DomainHub is IDomainHub, EIP712 {
     address public immutable SLOT_NUMBER_PROBE;
 
     /// @dev The rest of a domain's registration and its per-input state live in the first
-    /// page of its input queue.
+    /// page of its input queue. A vote reads and writes the first two words of this struct and
+    /// a quorum also the third. Consecutive slots almost always share a MIP-8 storage page, so
+    /// a vote loads one page here.
     struct DomainConfig {
         /// @dev Attested block numbers must be multiples of this interval. Also kept in the
         /// queue's config word; this copy spares a vote from loading the queue's page.
         uint64 checkpointInterval;
+        /// @dev Monotonic transition counter bound into every digest, so a round's signatures
+        /// cannot be replayed against a later transition.
+        uint64 stateNonce;
+        /// @dev L1 block number of the latest attested state root; strictly increasing.
+        uint64 domainBlockNumber;
         /// @dev Distinct validator signatures required to advance the state.
-        uint256 quorum;
+        uint32 quorum;
+        /// @dev Votes for `leadingProposal` in the current round; zero before the round's first
+        /// vote.
+        uint32 leadingVotes;
+        /// @dev Digest of the first proposal voted for in the current round. Other proposals
+        /// of the round are counted in `_otherVotes`.
+        bytes32 leadingProposal;
+        bytes32 stateRoot;
         address[] validators;
         /// @dev X25519 public key senders encrypt domain transactions to, or empty.
         bytes viewingKey;
-        mapping(address => bool) isValidator;
+        mapping(address => Voter) voters;
+    }
+
+    struct Voter {
+        bool isValidator;
+        /// @dev The last leading proposal it voted for. A digest binds the state nonce, so one
+        /// from an earlier round never matches a proposal of the current round.
+        bytes32 leadingVote;
     }
 
     /// @dev Registration of each domain, by chain id.
     mapping(uint64 => DomainConfig) internal _configs;
-    /// @notice Latest attested state root of each domain.
-    mapping(uint64 => bytes32) public stateRoots;
     /// @notice Attested batch roots of domain-origin messages, by source domain.
     mapping(uint64 => mapping(bytes32 => bool)) public domainAnchors;
-    /// @notice Domain-origin messages already relayed, by source domain.
-    mapping(uint64 => mapping(bytes32 => bool)) public relayedDomainMessages;
+    /// @dev Source nonces of the domain-origin messages already relayed, by source domain. A
+    /// spoke gives each of its messages its own nonce, so one slot covers 256 messages.
+    mapping(uint64 => BitMaps.BitMap) internal _relayed;
     /// @notice L1 callbacks that failed and await a successful retry, by source domain.
     mapping(uint64 => mapping(bytes32 => bool)) public failedDomainMessages;
-    /// @notice Monotonic per-domain transition counter bound into every digest, so a round's
-    /// signatures cannot be replayed against a later transition.
-    mapping(uint64 => uint256) public stateNonces;
-    /// @notice L1 block number of the latest attested state root, not the input queue's domain
-    /// block number; strictly increasing. Starts at the last scheduled height below the
-    /// registering L1 block.
-    mapping(uint64 => uint64) public domainBlockNumbers;
-    /// @notice Votes accumulated for a proposal, keyed by its `stateTransitionDigest`.
-    mapping(bytes32 => uint256) public stateVotes;
-    /// @notice Whether a validator has already voted for a proposal digest.
-    mapping(bytes32 => mapping(address => bool)) public hasVotedFor;
+    /// @dev Votes for proposals other than their round's leading one, by digest.
+    mapping(bytes32 => uint256) internal _otherVotes;
+    /// @dev Whether a validator voted for a proposal other than its round's leading one.
+    mapping(bytes32 => mapping(address => bool)) internal _otherVoters;
 
     constructor() EIP712("MonadDomainHub", "1") {
         // Runtime `SLOTNUM PUSH0 MSTORE PUSH1 32 PUSH0 RETURN` behind the init code that
@@ -153,18 +169,18 @@ contract DomainHub is IDomainHub, EIP712 {
         InputQueue.State memory state;
         _openBlock(queue, state, queueConfig, 0, 0);
         InputQueue.storeState(queue, state);
-        // The first checkpoint is the first scheduled height that covers the registering block.
-        domainBlockNumbers[domainChainId] = uint64((block.number - 1) / checkpointInterval * checkpointInterval);
 
         DomainConfig storage config = _configs[domainChainId];
         config.checkpointInterval = checkpointInterval;
-        config.quorum = quorum;
+        // The first checkpoint is the first scheduled height that covers the registering block.
+        config.domainBlockNumber = uint64((block.number - 1) / checkpointInterval * checkpointInterval);
+        config.quorum = SafeCast.toUint32(quorum);
         config.viewingKey = viewingKey;
         for (uint256 i = 0; i < validators.length; i++) {
             address validator = validators[i];
             if (validator == address(0)) revert ZeroValidator();
-            if (config.isValidator[validator]) revert DuplicateValidator();
-            config.isValidator[validator] = true;
+            if (config.voters[validator].isValidator) revert DuplicateValidator();
+            config.voters[validator].isValidator = true;
             config.validators.push(validator);
         }
 
@@ -210,6 +226,28 @@ contract DomainHub is IDomainHub, EIP712 {
     // State attestation
     // ---------------------------------------------------------------------
 
+    function stateRoots(uint64 domainChainId) external view returns (bytes32) {
+        return _configs[domainChainId].stateRoot;
+    }
+
+    function stateNonces(uint64 domainChainId) external view returns (uint256) {
+        return _configs[domainChainId].stateNonce;
+    }
+
+    function domainBlockNumbers(uint64 domainChainId) external view returns (uint64) {
+        return _configs[domainChainId].domainBlockNumber;
+    }
+
+    function stateVotes(uint64 domainChainId, bytes32 digest) external view returns (uint256) {
+        DomainConfig storage config = _configs[domainChainId];
+        return config.leadingProposal == digest ? config.leadingVotes : _otherVotes[digest];
+    }
+
+    function hasVotedFor(uint64 domainChainId, bytes32 digest, address validator) external view returns (bool) {
+        if (digest == bytes32(0)) return false;
+        return _configs[domainChainId].voters[validator].leadingVote == digest || _otherVoters[digest][validator];
+    }
+
     function stateTransitionDigest(
         uint64 domainChainId,
         uint64 domainBlockNumber,
@@ -221,7 +259,7 @@ contract DomainHub is IDomainHub, EIP712 {
                 abi.encode(
                     STATE_TRANSITION_TYPEHASH,
                     domainChainId,
-                    stateNonces[domainChainId],
+                    _configs[domainChainId].stateNonce,
                     domainBlockNumber,
                     newStateRoot,
                     domainAnchor
@@ -240,26 +278,39 @@ contract DomainHub is IDomainHub, EIP712 {
         DomainConfig storage config = _configs[domainChainId];
         uint64 checkpointInterval = config.checkpointInterval;
         if (checkpointInterval == 0) revert DomainNotRegistered();
-        if (domainBlockNumber <= domainBlockNumbers[domainChainId]) revert StaleBlockNumber();
+        if (domainBlockNumber <= config.domainBlockNumber) revert StaleBlockNumber();
         if (domainBlockNumber >= block.number) revert BlockNumberNotInPast();
         if (domainBlockNumber % checkpointInterval != 0) revert BlockNumberOffSchedule();
 
         bytes32 digest = stateTransitionDigest(domainChainId, domainBlockNumber, newStateRoot, domainAnchor);
         address signer = ECDSA.recover(digest, signature);
-        if (!config.isValidator[signer]) revert NotValidator();
-        if (hasVotedFor[digest][signer]) revert AlreadyVoted();
+        Voter storage voter = config.voters[signer];
+        if (!voter.isValidator) revert NotValidator();
 
-        hasVotedFor[digest][signer] = true;
-        uint256 votes = ++stateVotes[digest];
+        // The round's first proposal leads it and is counted in the config, which a vote
+        // loads anyway: the usual case, where validators agree. Another proposal of the round
+        // is counted on its own, at a higher cost.
+        if (config.leadingVotes == 0) config.leadingProposal = digest;
+        uint256 votes;
+        if (config.leadingProposal == digest) {
+            if (voter.leadingVote == digest) revert AlreadyVoted();
+            voter.leadingVote = digest;
+            votes = ++config.leadingVotes;
+        } else {
+            if (_otherVoters[digest][signer]) revert AlreadyVoted();
+            _otherVoters[digest][signer] = true;
+            votes = ++_otherVotes[digest];
+        }
         emit StateSignatureSubmitted(domainChainId, signer, domainBlockNumber, newStateRoot, domainAnchor, votes);
 
         // Advance exactly once, when the vote count first reaches quorum. The subsequent
         // stateNonce bump changes the digest, so this proposal can never be revisited.
         if (votes == config.quorum) {
-            uint256 nonce = stateNonces[domainChainId]++;
-            stateRoots[domainChainId] = newStateRoot;
+            uint256 nonce = config.stateNonce++;
+            config.stateRoot = newStateRoot;
+            config.domainBlockNumber = domainBlockNumber;
+            config.leadingVotes = 0;
             if (domainAnchor != bytes32(0)) domainAnchors[domainChainId][domainAnchor] = true;
-            domainBlockNumbers[domainChainId] = domainBlockNumber;
             // The attested state covers every input up to this height: stop holding them.
             uint256 queue = InputQueue.base(domainChainId);
             uint64 latestL1Block = uint64(InputQueue.load(queue, InputQueue.LATEST) >> 64);
@@ -280,13 +331,18 @@ contract DomainHub is IDomainHub, EIP712 {
         returns (bool success)
     {
         if (message.sourceChainId == message.destinationChainId) revert SameDomain();
-        if (_queueConfig(message.sourceChainId) == 0) revert SourceNotRegistered();
         if (message.to == address(0)) revert ZeroTarget();
+        BitMaps.BitMap storage relayed = _relayed[message.sourceChainId];
+        if (relayed.get(message.sourceNonce)) revert MessageAlreadyRelayed();
+        if (!domainAnchors[message.sourceChainId][anchor]) {
+            // Only a registered domain has anchors: its registration is read only to name
+            // the failure.
+            if (_queueConfig(message.sourceChainId) == 0) revert SourceNotRegistered();
+            revert UnknownAnchor();
+        }
         bytes32 messageHash = MessageLib.hashDomainMessage(message, block.chainid, address(this));
-        if (relayedDomainMessages[message.sourceChainId][messageHash]) revert MessageAlreadyRelayed();
-        if (!domainAnchors[message.sourceChainId][anchor]) revert UnknownAnchor();
         if (!MerkleProof.verifyCalldata(proof, anchor, messageHash)) revert InvalidProof();
-        relayedDomainMessages[message.sourceChainId][messageHash] = true;
+        relayed.set(message.sourceNonce);
 
         if (message.destinationChainId != block.chainid) {
             if (_queueConfig(message.destinationChainId) == 0) revert DestinationNotRegistered();
@@ -309,6 +365,10 @@ contract DomainHub is IDomainHub, EIP712 {
         emit DomainMessageRelayed(
             message.sourceChainId, messageHash, message.from, message.to, message.sourceNonce, success
         );
+    }
+
+    function relayedDomainMessages(uint64 sourceChainId, uint256 sourceNonce) external view returns (bool) {
+        return _relayed[sourceChainId].get(sourceNonce);
     }
 
     function retryDomainMessage(MessageLib.DomainMessage calldata message) external {

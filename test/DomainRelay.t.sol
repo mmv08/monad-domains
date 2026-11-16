@@ -93,7 +93,7 @@ contract DomainRelayTest is DomainTestBase {
         assertEq(receiver.sourceDomain(), CHAIN_A);
         assertEq(receiver.sourceSender(), sender);
         assertEq(receiver.payload(), message.data);
-        assertTrue(hub.relayedDomainMessages(CHAIN_A, hash));
+        assertTrue(hub.relayedDomainMessages(CHAIN_A, message.sourceNonce));
         assertFalse(hub.failedDomainMessages(CHAIN_A, hash));
     }
 
@@ -110,6 +110,25 @@ contract DomainRelayTest is DomainTestBase {
         vm.expectRevert(DomainHub.MessageAlreadyRelayed.selector);
         hub.relayDomainMessage(message, root, MerkleTreeLib.getProof(leaves, 0));
         assertEq(receiver.calls(), 1);
+    }
+
+    function test_replayBitsOfNeighbouringNoncesAreIndependent() public {
+        // 255 and 256 sit at the end of one bitmap word and the start of the next.
+        uint256[4] memory nonces = [uint256(254), 255, 256, 257];
+        bytes32[] memory leaves = new bytes32[](nonces.length);
+        for (uint256 i = 0; i < nonces.length; i++) {
+            leaves[i] = _hash(_message(nonces[i]));
+        }
+        bytes32 root = MerkleTreeLib.root(leaves);
+        _anchor(CHAIN_A, root);
+        for (uint256 i = 0; i < nonces.length; i++) {
+            for (uint256 j = 0; j < nonces.length; j++) {
+                assertEq(hub.relayedDomainMessages(CHAIN_A, nonces[j]), j < i);
+            }
+            assertTrue(hub.relayDomainMessage(_message(nonces[i]), root, MerkleTreeLib.getProof(leaves, i)));
+        }
+        assertFalse(hub.relayedDomainMessages(CHAIN_B, 255));
+        assertEq(receiver.calls(), nonces.length);
     }
 
     function test_identicalMessagesFromDifferentDomainsAreIndependent() public {
@@ -159,7 +178,7 @@ contract DomainRelayTest is DomainTestBase {
         vm.expectEmit(address(hub));
         emit IDomainHub.DomainMessageRelayed(CHAIN_A, hash, sender, address(receiver), 0, false);
         assertFalse(_relay(message));
-        assertTrue(hub.relayedDomainMessages(CHAIN_A, hash));
+        assertTrue(hub.relayedDomainMessages(CHAIN_A, message.sourceNonce));
         assertTrue(hub.failedDomainMessages(CHAIN_A, hash));
         vm.expectRevert(DomainHub.MessageAlreadyRelayed.selector);
         _relay(message);
@@ -225,7 +244,7 @@ contract DomainRelayTest is DomainTestBase {
         bytes32 hash = _hash(message);
         _anchor(CHAIN_A, hash);
         assertTrue(_relay(message));
-        assertTrue(hub.relayedDomainMessages(CHAIN_A, hash));
+        assertTrue(hub.relayedDomainMessages(CHAIN_A, message.sourceNonce));
         assertFalse(hub.failedDomainMessages(CHAIN_A, hash));
         vm.expectRevert(DomainHub.MessageAlreadyRelayed.selector);
         _relay(message);

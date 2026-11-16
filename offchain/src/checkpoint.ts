@@ -39,7 +39,7 @@ export const HUB_CHECKPOINT_ABI = parseAbi([
   "function domainBlockNumbers(uint64 domainChainId) view returns (uint64)",
   "function checkpointIntervals(uint64 domainChainId) view returns (uint64)",
   "function stateNonces(uint64 domainChainId) view returns (uint256)",
-  "function hasVotedFor(bytes32 digest, address validator) view returns (bool)",
+  "function hasVotedFor(uint64 domainChainId, bytes32 digest, address validator) view returns (bool)",
   "function stateTransitionDigest(uint64 domainChainId, uint64 domainBlockNumber, bytes32 newStateRoot, bytes32 domainAnchor) view returns (bytes32)",
   "function submitStateSignature(uint64 domainChainId, uint64 domainBlockNumber, bytes32 newStateRoot, bytes32 domainAnchor, bytes signature)",
 ]);
@@ -331,7 +331,7 @@ export async function attestCheckpoint(args: {
   const attestedHeight = async () =>
     BigInt(await l1.readContract({ address: hub, abi: HUB_CHECKPOINT_ABI, functionName: "domainBlockNumbers", args: [checkpoint.domainChainId] }));
   const hasVoted = (validator: Address) =>
-    l1.readContract({ address: hub, abi: HUB_CHECKPOINT_ABI, functionName: "hasVotedFor", args: [digest, validator] });
+    l1.readContract({ address: hub, abi: HUB_CHECKPOINT_ABI, functionName: "hasVotedFor", args: [checkpoint.domainChainId, digest, validator] });
 
   const submitted: Hex[] = [];
   for (const key of validatorKeys) {
